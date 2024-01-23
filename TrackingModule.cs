@@ -153,27 +153,36 @@ namespace VirtualDesktop.FaceTracking
                     isTracking = true;
                 }
 
-                if (faceState->IsEyeFollowingBlendshapesValid)
+                if (faceState->IsEyeFollowingBlendshapesValid || faceState->FaceIsValid)
                 {
-                    UpdateEyeExpressions(UnifiedTracking.Data.Shapes, expressions);
-                    isTracking = true;
-                }
-
-                if (faceState->FaceIsValid)
-                {
-                    UpdateMouthExpressions(UnifiedTracking.Data.Shapes, expressions);
+                    UpdateEyeAndMouthExpressions(UnifiedTracking.Data.Shapes, expressions);
                     isTracking = true;
                 }
             }
 
             IsTracking = isTracking;
         }
+        
+        private const float EmaFactor = 0.5f;
+        private float[] _ema = new float[1000];
+        
+        private float Ema(int key, float newValue)
+        {
+
+            _ema[key] = _ema[key] * EmaFactor + newValue * (1 - EmaFactor);
+            
+            return _ema[key];
+        }
 
         private void UpdateEyeData(UnifiedEyeData eye, float* expressions, Quaternion orientationL, Quaternion orientationR)
         {
             // Eye Openness parsing
-            eye.Left.Openness = 1.0f - Math.Max(0, Math.Min(1, expressions[(int)Expressions.EyesClosedL] + expressions[(int)Expressions.EyesClosedL] * expressions[(int)Expressions.LidTightenerL]));
-            eye.Right.Openness = 1.0f - (float)Math.Max(0, Math.Min(1, expressions[(int)Expressions.EyesClosedR] + expressions[(int)Expressions.EyesClosedR] * expressions[(int)Expressions.LidTightenerR]));
+            var leftEyeExpression = expressions[(int)Expressions.EyesClosedL] + expressions[(int)Expressions.EyesClosedL] * expressions[(int)Expressions.LidTightenerL];
+            var rightEyeExpression = expressions[(int)Expressions.EyesClosedR] + expressions[(int)Expressions.EyesClosedR] * expressions[(int)Expressions.LidTightenerR];
+            var emaKeyBegin = 900;
+            eye.Left.Openness = Ema(++emaKeyBegin ,1.0f - Math.Clamp(leftEyeExpression, 0, 1));
+            eye.Right.Openness = Ema(++emaKeyBegin,1.0f - Math.Clamp(rightEyeExpression, 0, 1));
+            
 
             // Eye Gaze parsing
             double qx = orientationL.X;
@@ -187,10 +196,10 @@ namespace VirtualDesktop.FaceTracking
             var pitchL = (180.0 / Math.PI) * pitch; // from radians
             var yawL = (180.0 / Math.PI) * yaw;
 
-            qx = orientationL.X;
-            qy = orientationL.Y;
-            qz = orientationL.Z;
-            qw = orientationL.W;
+            qx = orientationR.X;
+            qy = orientationR.Y;
+            qz = orientationR.Z;
+            qw = orientationR.W;
             yaw = Math.Atan2(2.0 * (qy * qz + qw * qx), qw * qw - qx * qx - qy * qy + qz * qz);
             pitch = Math.Asin(-2.0 * (qx * qz - qw * qy));
 
@@ -204,9 +213,21 @@ namespace VirtualDesktop.FaceTracking
             var pitchLmod = (float)(Math.Abs(pitchL) + 4f * Math.Pow(Math.Abs(pitchL) / 30f, 30f));
             var yawRmod = (float)(Math.Abs(yawR) + 6f * Math.Pow(Math.Abs(yawR) / 27f, 18f)); // curves the tail end to better accomodate actual eye pos.
             var yawLmod = (float)(Math.Abs(yawL) + 6f * Math.Pow(Math.Abs(yawL) / 27f, 18f));
-
-            eye.Right.Gaze = new Vector2(pitchR < 0 ? pitchRmod * radianConst : -1 * pitchRmod * radianConst, yawR < 0 ? -1 * yawRmod * radianConst : (float)yawR * radianConst);
-            eye.Left.Gaze = new Vector2(pitchL < 0 ? pitchLmod * radianConst : -1 * pitchLmod * radianConst, yawL < 0 ? -1 * yawLmod * radianConst : (float)yawL * radianConst);
+            
+            Vector2 CalculateGaze(float pitch, float pitchMod, float yaw, float yawMod, float radianConst)
+            {
+                float pitchValue = pitch < 0 ? pitchMod * radianConst : -pitchMod * radianConst;
+                float yawValue = yaw < 0 ? -yawMod * radianConst : yaw * radianConst;
+                return new Vector2(pitchValue, yawValue);
+            }
+            
+            eye.Right.Gaze = CalculateGaze((float)pitchR, pitchRmod, (float)yawR, yawRmod, radianConst);
+            eye.Left.Gaze = CalculateGaze((float)pitchL, pitchLmod, (float)yawL, yawLmod, radianConst);
+            eye.Right.Gaze.x = Ema(++emaKeyBegin, eye.Right.Gaze.x);
+            eye.Right.Gaze.y = Ema(++emaKeyBegin, eye.Right.Gaze.y);
+            eye.Left.Gaze.x = Ema(++emaKeyBegin, eye.Left.Gaze.x);
+            eye.Left.Gaze.y = Ema(++emaKeyBegin, eye.Left.Gaze.y);
+            
 
             // Eye dilation code, automated process maybe?
             eye.Left.PupilDiameter_MM = 5f;
@@ -216,104 +237,35 @@ namespace VirtualDesktop.FaceTracking
             eye._minDilation = 0;
             eye._maxDilation = 10;
         }
+        
+        private  readonly Expressions[] _expressionMap = ExpressionMappings.Map;
 
-        private void UpdateEyeExpressions(UnifiedExpressionShape[] unifiedExpressions, float* expressions)
+        private void UpdateEyeAndMouthExpressions(UnifiedExpressionShape[] unifiedExpressions, float* expressions)
         {
-            // Eye Expressions Set
-            unifiedExpressions[(int)UnifiedExpressions.EyeWideLeft].Weight = expressions[(int)Expressions.UpperLidRaiserL];
-            unifiedExpressions[(int)UnifiedExpressions.EyeWideRight].Weight = expressions[(int)Expressions.UpperLidRaiserR];
-
-            unifiedExpressions[(int)UnifiedExpressions.EyeSquintLeft].Weight = expressions[(int)Expressions.LidTightenerL];
-            unifiedExpressions[(int)UnifiedExpressions.EyeSquintRight].Weight = expressions[(int)Expressions.LidTightenerR];
-
-            // Brow Expressions Set
-            unifiedExpressions[(int)UnifiedExpressions.BrowInnerUpLeft].Weight = expressions[(int)Expressions.InnerBrowRaiserL];
-            unifiedExpressions[(int)UnifiedExpressions.BrowInnerUpRight].Weight = expressions[(int)Expressions.InnerBrowRaiserR];
-            unifiedExpressions[(int)UnifiedExpressions.BrowOuterUpLeft].Weight = expressions[(int)Expressions.OuterBrowRaiserL];
-            unifiedExpressions[(int)UnifiedExpressions.BrowOuterUpRight].Weight = expressions[(int)Expressions.OuterBrowRaiserR];
-
-            unifiedExpressions[(int)UnifiedExpressions.BrowPinchLeft].Weight = expressions[(int)Expressions.BrowLowererL];
-            unifiedExpressions[(int)UnifiedExpressions.BrowLowererLeft].Weight = expressions[(int)Expressions.BrowLowererL];
-            unifiedExpressions[(int)UnifiedExpressions.BrowPinchRight].Weight = expressions[(int)Expressions.BrowLowererR];
-            unifiedExpressions[(int)UnifiedExpressions.BrowLowererRight].Weight = expressions[(int)Expressions.BrowLowererR];
-        }
-
-        private void UpdateMouthExpressions(UnifiedExpressionShape[] unifiedExpressions, float* expressions)
-        {
-            // Jaw Expression Set                        
-            unifiedExpressions[(int)UnifiedExpressions.JawOpen].Weight = expressions[(int)Expressions.JawDrop];
-            unifiedExpressions[(int)UnifiedExpressions.JawLeft].Weight = expressions[(int)Expressions.JawSidewaysLeft];
-            unifiedExpressions[(int)UnifiedExpressions.JawRight].Weight = expressions[(int)Expressions.JawSidewaysRight];
-            unifiedExpressions[(int)UnifiedExpressions.JawForward].Weight = expressions[(int)Expressions.JawThrust];
-
-            // Mouth Expression Set   
-            unifiedExpressions[(int)UnifiedExpressions.MouthClosed].Weight = expressions[(int)Expressions.LipsToward];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthUpperLeft].Weight = expressions[(int)Expressions.MouthLeft];
-            unifiedExpressions[(int)UnifiedExpressions.MouthLowerLeft].Weight = expressions[(int)Expressions.MouthLeft];
-            unifiedExpressions[(int)UnifiedExpressions.MouthUpperRight].Weight = expressions[(int)Expressions.MouthRight];
-            unifiedExpressions[(int)UnifiedExpressions.MouthLowerRight].Weight = expressions[(int)Expressions.MouthRight];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthCornerPullLeft].Weight = expressions[(int)Expressions.LipCornerPullerL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthCornerSlantLeft].Weight = expressions[(int)Expressions.LipCornerPullerL]; // Slant (Sharp Corner Raiser) is baked into Corner Puller.
-            unifiedExpressions[(int)UnifiedExpressions.MouthCornerPullRight].Weight = expressions[(int)Expressions.LipCornerPullerR];
-            unifiedExpressions[(int)UnifiedExpressions.MouthCornerSlantRight].Weight = expressions[(int)Expressions.LipCornerPullerR]; // Slant (Sharp Corner Raiser) is baked into Corner Puller.
-            unifiedExpressions[(int)UnifiedExpressions.MouthFrownLeft].Weight = expressions[(int)Expressions.LipCornerDepressorL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthFrownRight].Weight = expressions[(int)Expressions.LipCornerDepressorR];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthLowerDownLeft].Weight = expressions[(int)Expressions.LowerLipDepressorL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthLowerDownRight].Weight = expressions[(int)Expressions.LowerLipDepressorR];
-
+            for (var i = 0; i < (int)UnifiedExpressions.Max; i++)
+            {
+                unifiedExpressions[i].Weight = Ema(i, expressions[(int)_expressionMap[i]]);
+            }
+            
+            // Special case for eye wide, since it's a combination of two expressions.
             unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpLeft].Weight = Math.Max(0, expressions[(int)Expressions.UpperLipRaiserL] - expressions[(int)Expressions.NoseWrinklerL]); // Workaround for upper lip up wierd tracking quirk.
             unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenLeft].Weight = Math.Max(0, expressions[(int)Expressions.UpperLipRaiserL] - expressions[(int)Expressions.NoseWrinklerL]); // Workaround for upper lip up wierd tracking quirk.
             unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpRight].Weight = Math.Max(0, expressions[(int)Expressions.UpperLipRaiserR] - expressions[(int)Expressions.NoseWrinklerR]); // Workaround for upper lip up wierd tracking quirk.
             unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenRight].Weight = Math.Max(0, expressions[(int)Expressions.UpperLipRaiserR] - expressions[(int)Expressions.NoseWrinklerR]); // Workaround for upper lip up wierd tracking quirk.
+            // Apply EMA to the eye wide expressions.
+            unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpLeft].Weight = Ema((int)UnifiedExpressions.MouthUpperUpLeft, unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpLeft].Weight);
+            unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenLeft].Weight = Ema((int)UnifiedExpressions.MouthUpperDeepenLeft, unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenLeft].Weight);
+            unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpRight].Weight = Ema((int)UnifiedExpressions.MouthUpperUpRight, unifiedExpressions[(int)UnifiedExpressions.MouthUpperUpRight].Weight);
+            unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenRight].Weight = Ema((int)UnifiedExpressions.MouthUpperDeepenRight, unifiedExpressions[(int)UnifiedExpressions.MouthUpperDeepenRight].Weight);
 
-            unifiedExpressions[(int)UnifiedExpressions.MouthRaiserUpper].Weight = expressions[(int)Expressions.ChinRaiserT];
-            unifiedExpressions[(int)UnifiedExpressions.MouthRaiserLower].Weight = expressions[(int)Expressions.ChinRaiserB];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthDimpleLeft].Weight = expressions[(int)Expressions.DimplerL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthDimpleRight].Weight = expressions[(int)Expressions.DimplerR];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthTightenerLeft].Weight = expressions[(int)Expressions.LipTightenerL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthTightenerRight].Weight = expressions[(int)Expressions.LipTightenerR];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthPressLeft].Weight = expressions[(int)Expressions.LipPressorL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthPressRight].Weight = expressions[(int)Expressions.LipPressorR];
-
-            unifiedExpressions[(int)UnifiedExpressions.MouthStretchLeft].Weight = expressions[(int)Expressions.LipStretcherL];
-            unifiedExpressions[(int)UnifiedExpressions.MouthStretchRight].Weight = expressions[(int)Expressions.LipStretcherR];
-
-            // Lip Expression Set   
-            unifiedExpressions[(int)UnifiedExpressions.LipPuckerUpperRight].Weight = expressions[(int)Expressions.LipPuckerR];
-            unifiedExpressions[(int)UnifiedExpressions.LipPuckerLowerRight].Weight = expressions[(int)Expressions.LipPuckerR];
-            unifiedExpressions[(int)UnifiedExpressions.LipPuckerUpperLeft].Weight = expressions[(int)Expressions.LipPuckerL];
-            unifiedExpressions[(int)UnifiedExpressions.LipPuckerLowerLeft].Weight = expressions[(int)Expressions.LipPuckerL];
-
-            unifiedExpressions[(int)UnifiedExpressions.LipFunnelUpperLeft].Weight = expressions[(int)Expressions.LipFunnelerLt];
-            unifiedExpressions[(int)UnifiedExpressions.LipFunnelUpperRight].Weight = expressions[(int)Expressions.LipFunnelerRt];
-            unifiedExpressions[(int)UnifiedExpressions.LipFunnelLowerLeft].Weight = expressions[(int)Expressions.LipFunnelerLb];
-            unifiedExpressions[(int)UnifiedExpressions.LipFunnelLowerRight].Weight = expressions[(int)Expressions.LipFunnelerRb];
 
             unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperLeft].Weight = Math.Min(1f - (float)Math.Pow(expressions[(int)Expressions.UpperLipRaiserL], 1f / 6f), expressions[(int)Expressions.LipSuckLt]);
             unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperRight].Weight = Math.Min(1f - (float)Math.Pow(expressions[(int)Expressions.UpperLipRaiserR], 1f / 6f), expressions[(int)Expressions.LipSuckRt]);
-            unifiedExpressions[(int)UnifiedExpressions.LipSuckLowerLeft].Weight = expressions[(int)Expressions.LipSuckLb];
-            unifiedExpressions[(int)UnifiedExpressions.LipSuckLowerRight].Weight = expressions[(int)Expressions.LipSuckRb];
+            // Apply EMA to the lip suck expressions.
+            unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperLeft].Weight = Ema((int)UnifiedExpressions.LipSuckUpperLeft, unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperLeft].Weight);
+            unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperRight].Weight = Ema((int)UnifiedExpressions.LipSuckUpperRight, unifiedExpressions[(int)UnifiedExpressions.LipSuckUpperRight].Weight);
 
-            // Cheek Expression Set   
-            unifiedExpressions[(int)UnifiedExpressions.CheekPuffLeft].Weight = expressions[(int)Expressions.CheekPuffL];
-            unifiedExpressions[(int)UnifiedExpressions.CheekPuffRight].Weight = expressions[(int)Expressions.CheekPuffR];
-            unifiedExpressions[(int)UnifiedExpressions.CheekSuckLeft].Weight = expressions[(int)Expressions.CheekSuckL];
-            unifiedExpressions[(int)UnifiedExpressions.CheekSuckRight].Weight = expressions[(int)Expressions.CheekSuckR];
-            unifiedExpressions[(int)UnifiedExpressions.CheekSquintLeft].Weight = expressions[(int)Expressions.CheekRaiserL];
-            unifiedExpressions[(int)UnifiedExpressions.CheekSquintRight].Weight = expressions[(int)Expressions.CheekRaiserR];
 
-            // Nose Expression Set             
-            unifiedExpressions[(int)UnifiedExpressions.NoseSneerLeft].Weight = expressions[(int)Expressions.NoseWrinklerL];
-            unifiedExpressions[(int)UnifiedExpressions.NoseSneerRight].Weight = expressions[(int)Expressions.NoseWrinklerR];
-
-            // Tongue Expression Set   
-            // Future placeholder
             unifiedExpressions[(int)UnifiedExpressions.TongueOut].Weight = 0f;
         }
         #endregion

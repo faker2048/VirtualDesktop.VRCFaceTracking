@@ -2,6 +2,7 @@
 {
     public enum Expressions
     {
+        None = -1,
         BrowLowererL = 0,
         BrowLowererR = 1,
         CheekPuffL = 2,
